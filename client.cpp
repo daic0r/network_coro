@@ -94,11 +94,11 @@ task my_coro(std::thread& t) {
 
 
 int main() {
-	/*
-	asio::io_context ctx{};
+    asio::io_context ctx;
+
 	asio::error_code ec{};
 
-	asio::ip::tcp::endpoint ep{ asio::ip::make_address("51.38.81.49", ec), 80 };
+	asio::ip::tcp::endpoint ep{ asio::ip::make_address("93.184.216.34", ec), 80 };
 
 	asio::ip::tcp::socket sock{ ctx };
 
@@ -108,14 +108,39 @@ int main() {
 		std::cout << "Connected\n";	
 	} else {
 		std::cerr << "Error connecting: " << ec.message() << "\n";
+        return -1;
 	}
-	*/
 
+    if (sock.is_open()) {
+        std::string sRequest = 
+            "GET /index.html HTTP/1.1\r\n"
+            "Host: example.com\r\n"
+            "Connection: close\r\n\r\n";
+            sock.write_some(asio::buffer(sRequest.data(), sRequest.size()), ec);
+
+            using namespace std::chrono_literals;
+            std::this_thread::sleep_for(2s);
+            const auto nAvail = sock.available();
+            std::cout << "Bytes available: " << nAvail << std::endl;
+            
+            if (nAvail > 0) {
+                std::vector<char> vBuf(nAvail);
+                sock.read_some(asio::buffer(vBuf.data(), nAvail), ec);
+
+                for (auto ch : vBuf)
+                    std::cout << ch;
+            }
+
+        sock.close();
+    }
+
+    /*
     std::thread thr;
 	task t = my_coro(thr);
 
 	int i;
 	std::cin >> i;
+    */
 
 //    thr.join();
 
