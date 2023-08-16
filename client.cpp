@@ -49,24 +49,44 @@ namespace ice {
         std::coroutine_handle<> m_coro;
 
         public:
+        struct base_awaitable {
+            socket& m_sock;
+
+            bool await_ready() const noexcept { return false; }
+        };
+        template<typename T = void, typename = void> struct awaitable;
         template<typename T>
-            struct awaitable {
-                socket& m_sock;
+            struct awaitable<T, std::enable_if_t<not std::is_same_v<T, void>>> : base_awaitable {
                 std::function<void(std::optional<T>&)> m_func;
                 std::optional<T> m_value;
 
                 template<typename F>
-                    awaitable(socket& sock, F&& func) : m_sock{ sock }, m_func{ std::forward<F>(func) } {}
+                    awaitable(socket& sock, F&& func) : base_awaitable{ sock }, m_func{ std::forward<F>(func) } {}
 
-                bool await_ready() const noexcept { return false; }
                 bool await_suspend(std::coroutine_handle<> coro) noexcept {
                     m_sock.setCoroHandle(coro);
                     m_func(m_value); 
                     return true;
                 }
                 T await_resume() noexcept {
-                    std::cout << "Resuming with " << (*m_value).size() << " bytes\n";
+                    //std::cout << "Resuming with " << (*m_value).size() << " bytes\n";
                     return std::move(*m_value);
+                }
+            };
+        template<typename T>
+            struct awaitable<T, std::enable_if_t<std::is_same_v<T, void>>> : base_awaitable {
+                std::function<void()> m_func;
+
+                template<typename F>
+                    awaitable(socket& sock, F&& func) : base_awaitable{ sock }, m_func{ std::forward<F>(func) } {}
+
+                bool await_suspend(std::coroutine_handle<> coro) noexcept {
+                    m_sock.setCoroHandle(coro);
+                    m_func(); 
+                    return true;
+                }
+                void await_resume() noexcept {
+                    std::cout << "Resuming\n";
                 }
             };
 
@@ -79,15 +99,34 @@ namespace ice {
             m_socket.close();
         }
 
-        void connect(asio::ip::tcp::endpoint ep) {
-            std::error_code ec;
-            m_socket.connect(ep, ec);
+        awaitable<bool> connect(asio::ip::tcp::endpoint ep) {
+            /*
+               std::error_code ec;
+               m_socket.connect(ep, ec);
+               */
+            return awaitable<bool>{ *this, [this,&ep](std::optional<bool>& bRet) {
+                m_socket.async_connect(ep, [&bRet,this](std::error_code ec) {
+                        bRet = not ec;
+                        m_coro.resume();
+                        });
+            } };
         }
 
         awaitable<std::vector<char>> read() {
             return awaitable<std::vector<char>>{ *this, [this](std::optional<std::vector<char>>& val) mutable {
                 val.emplace();
                 _read(*val); 
+            } };
+        }
+
+        awaitable<> write(std::string_view str) {
+            return awaitable<>{ *this, [this, str]() {
+                m_socket.async_write_some(asio::buffer(str.data(), str.size()),
+                    [this](std::error_code ec, std::size_t nBytesSent) {
+                        std::cout << nBytesSent << " bytes sent\n";
+                        m_coro.resume();
+                    }
+                );
             } };
         }
 
@@ -102,17 +141,16 @@ namespace ice {
                 std::cout << "_read() called\n";
                 std::vector<char> vBuf(1024*64);
                 m_socket.async_read_some(asio::buffer(vBuf.data(), vBuf.size()),
-                        [this,&vWholeBuf,vBuf=std::move(vBuf)](std::error_code ec, std::size_t nSize) {
+                        [this,&vWholeBuf,vBuf=std::move(vBuf)](std::error_code ec, std::size_t nSize) mutable {
                             if (ec) {
-                                std::cout << "Resuming now with buffer of size " << vWholeBuf.size() << "...\n";
                                 m_coro.resume();
                                 return;
                             }
                             std::cout << "Read " << nSize << " bytes\n";
-                            std::copy(vBuf.begin(), vBuf.end(), std::back_inserter(vWholeBuf));
-                            std::cout << "vBuf is now " << vBuf.size() << " bytes in size...\n";
+                            vWholeBuf.reserve(vWholeBuf.size() + nSize);
+                            std::move(vBuf.begin(), std::next(vBuf.begin(), nSize), std::back_inserter(vWholeBuf));
+                            //vWholeBuf.insert(vWholeBuf.end(), std::make_move_iterator(vBuf.begin()), std::make_move_iterator(std::next(vBuf.begin(), nSize)));
                             std::cout << "vWholeBuf is now " << vWholeBuf.size() << " bytes in size...\n";
-                            //vWholeBuf.insert(vWholeBuf.end(), vBuf.begin(), vBuf.end());
                             _read(vWholeBuf);
                         }
                 );
@@ -176,39 +214,24 @@ private:
     */
 };
 
-task client(ice::socket& sock) {
+task client(ice::socket& sock, asio::ip::tcp::endpoint ep) {
+    bool bSucc = co_await sock.connect(ep);
+    if (not bSucc)
+        throw std::runtime_error("Could not connect");
+
+    std::string sRequest = 
+        "GET /index.html HTTP/1.1\r\n"
+        "Host: example.com\r\n"
+        "Connection: close\r\n\r\n";
+
+    co_await sock.write(sRequest);
+    
     std::vector<char> buf = co_await sock.read();
+
     std::cout << "Buf is " << buf.size() << " bytes\n";
     for (auto ch: buf)
         std::cout << ch;
 }
-
-/*
-task my_coro(std::thread& t) {
-
-	std::cout << "Coroutine started on thread " << std::this_thread::get_id() << "\n";
-    int answr;
-	co_await calculate_it(t, answr);
-	std::cout << "Calculated " << answr << ", not on thread " << std::this_thread::get_id() << "\n";
-	co_return;
-}
-*/
-
-std::vector<char> vBuf(1024 * 64);
-
-void grabData(asio::ip::tcp::socket& sock) {
-    sock.async_read_some(asio::buffer(vBuf.data(), vBuf.size()),
-            [&](std::error_code ec, std::size_t nSize) {
-                if (ec)
-                    return;
-                std::cout << "Reading " << nSize << " bytes\n";
-                for (auto ch : vBuf)
-                    std::cout << ch;
-                grabData(sock);
-            }
-    );
-}
-
 
 int main() {
     asio::io_context ctx;
@@ -225,59 +248,15 @@ int main() {
 
     ice::socket sock{ ctx };
 
-	sock.connect(ep);
+    task t = client(sock, ep);
 
-	if (!ec) {
-		std::cout << "Connected\n";	
-	} else {
-		std::cerr << "Error connecting: " << ec.message() << "\n";
-        return -1;
-	}
+    int i;
+    std::cin >> i;
 
-    if (sock.underlying().is_open()) {
-        std::string sRequest = 
-            "GET /index.html HTTP/1.1\r\n"
-            "Host: example.com\r\n"
-            "Connection: close\r\n\r\n";
-            sock.underlying().write_some(asio::buffer(sRequest.data(), sRequest.size()), ec);
-
-            /*
-            using namespace std::chrono_literals;
-            std::this_thread::sleep_for(2s);
-            const auto nAvail = sock.available();
-            std::cout << "Bytes available: " << nAvail << std::endl;
-            
-            if (nAvail > 0) {
-                std::vector<char> vBuf(nAvail);
-                sock.read_some(asio::buffer(vBuf.data(), nAvail), ec);
-
-                for (auto ch : vBuf)
-                    std::cout << ch;
-            }
-            */
-        //grabData(sock);
-        //
-        task t = client(sock);
-
-        int i;
-        std::cin >> i;
-
-        ctx.stop();
-        if (thr.joinable())
-            thr.join();
+    ctx.stop();
+    if (thr.joinable())
+        thr.join();
 
 
-        //sock.close();
-    }
-
-    /*
-    std::thread thr;
-	task t = my_coro(thr);
-
-	int i;
-	std::cin >> i;
-    */
-
-//    thr.join();
 
 }
