@@ -100,15 +100,11 @@ namespace ice {
         }
 
         awaitable<bool> connect(asio::ip::tcp::endpoint ep) {
-            /*
-               std::error_code ec;
-               m_socket.connect(ep, ec);
-               */
             return awaitable<bool>{ *this, [this,&ep](std::optional<bool>& bRet) {
                 m_socket.async_connect(ep, [&bRet,this](std::error_code ec) {
                         bRet = not ec;
                         m_coro.resume();
-                        });
+                    });
             } };
         }
 
@@ -120,13 +116,8 @@ namespace ice {
         }
 
         awaitable<> write(std::string_view str) {
-            return awaitable<>{ *this, [this, str]() {
-                m_socket.async_write_some(asio::buffer(str.data(), str.size()),
-                    [this](std::error_code ec, std::size_t nBytesSent) {
-                        std::cout << nBytesSent << " bytes sent\n";
-                        m_coro.resume();
-                    }
-                );
+            return awaitable<>{ *this, [this, str]() mutable {
+                _write(str);
             } };
         }
 
@@ -137,6 +128,19 @@ namespace ice {
         asio::ip::tcp::socket& underlying() { return m_socket; }
 
         private:
+            void _write(std::string_view& str) {
+                m_socket.async_write_some(asio::buffer(str.data(), str.size()),
+                    [this,&str](std::error_code ec, std::size_t nBytesSent) {
+                        std::cout << nBytesSent << " bytes sent\n";
+                        if (nBytesSent == str.size()) {
+                            m_coro.resume();
+                            return;
+                        }
+                        str.remove_prefix(nBytesSent);
+                        _write(str);
+                    }
+                );
+            }
             void _read(std::vector<char>& vWholeBuf) {
                 std::cout << "_read() called\n";
                 std::vector<char> vBuf(1024*64);
@@ -242,7 +246,7 @@ int main() {
 
 	asio::error_code ec{};
 
-	asio::ip::tcp::endpoint ep{ asio::ip::make_address("93.184.216.34", ec), 80 };
+	asio::ip::tcp::endpoint ep{ asio::ip::make_address("127.0.0.1", ec), 60000 };
 
 	//asio::ip::tcp::socket sock{ ctx };
 
