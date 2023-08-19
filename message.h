@@ -2,18 +2,93 @@
 #define MESSAGE_H
 
 #include <cstdint>
+#include <cstring>
 #include <type_traits>
 #include <concepts>
+#include <vector>
+#include <tuple>
 
 namespace ice {
+    template<typename T>
+    concept Enumeration = std::is_enum_v<T>;
+
+    template<typename T>
+    concept Trivial = std::is_trivial_v<T>;
+
     namespace net {
-        template<typename T, typename = void>
-        struct message;
-        template<typename T>
-        struct message<T, std::enable_if_t<std::is_enum_v<T>>> {
-            T messageID;
-            std::uint32_t nSize;
+        namespace detail {
+            template<typename T>
+            struct sizeof_tuple;
+            template<typename... Ts>
+            struct sizeof_tuple<std::tuple<Ts...>> {
+                static constexpr auto value = (sizeof(Ts) + ...);
+            };
+
+            template<typename T>
+            static constexpr auto sizeof_tuple_v = sizeof_tuple<T>::value;
+        }
+        enum class message_type {
+            NONE,
+            CLIENT_HELLO,
+            SERVER_HANDSHAKE,
+            CLIENT_HANDSHAKE
         };
+
+        template<Enumeration Enum, Enum T>
+        struct payload_definition;
+        template<>
+        struct payload_definition<message_type, message_type::CLIENT_HELLO> {
+            using data = std::tuple<char[6]>;
+            static constexpr auto size_bytes = detail::sizeof_tuple_v<data>;
+        };
+
+        template<Enumeration Enum>
+        struct message_payload {
+            std::vector<char> vBytes{};
+            std::size_t nPos{};
+            
+            constexpr message_payload() {
+                vBytes.resize(0);
+            }
+
+            constexpr auto size() const noexcept { return vBytes.size(); }
+            constexpr auto data() noexcept { return vBytes.data(); }
+
+            template<Trivial T>
+            friend constexpr message_payload& operator<<(message_payload& mp, T const& data) {
+                const auto nOldSize = mp.vBytes.size();
+                mp.vBytes.resize(nOldSize + sizeof(T));
+                std::memcpy(std::next(mp.vBytes.data(), nOldSize), &data, sizeof(T));
+                mp.nPos += sizeof(T);
+                return mp;
+            }
+
+            template<Trivial T>
+            friend constexpr message_payload& operator>>(message_payload& mp, T& data) {
+                mp.nPos -= sizeof(T);
+                std::memcpy(&data, std::next(mp.vBytes.data(), mp.nPos), sizeof(T));
+                return mp;
+            }
+
+            template<Enum E>
+            constexpr typename payload_definition<Enum, E>::data read() noexcept {
+                typename payload_definition<Enum, E>::data ret{};
+                _read(ret, std::make_index_sequence<std::tuple_size_v<typename payload_definition<Enum, E>::data>>());
+                return ret;
+            }
+        private:
+            template<typename... Ts, std::size_t... Is>
+            constexpr auto _read(std::tuple<Ts...>& outTup, std::index_sequence<Is...>) noexcept {
+                return std::make_tuple((..., (*this >> std::get<sizeof...(Is)-Is-1>(outTup))));
+            }
+        };
+
+        template<Enumeration T>
+        struct message {
+            T messageID{};
+            std::uint32_t nSize{};
+        };
+
     }
 }
 

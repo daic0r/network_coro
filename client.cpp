@@ -2,6 +2,7 @@
 #include <asio/error_code.hpp>
 #include <asio/io_context.hpp>
 #include <asio/ip/address.hpp>
+#include <asio/use_awaitable.hpp>
 #include <iostream>
 #include <system_error>
 #include <thread>
@@ -9,6 +10,10 @@
 #include <chrono>
 #include <optional>
 #include <future>
+#include "message.h"
+
+using asio::awaitable;
+using asio::use_awaitable;
 
 /*
 template<typename Result>
@@ -237,6 +242,21 @@ task client(ice::socket& sock, asio::ip::tcp::endpoint ep) {
         std::cout << ch;
 }
 
+awaitable<void> client2(asio::ip::tcp::socket& sock, asio::ip::tcp::endpoint ep) {
+    using namespace ice::net;
+
+    co_await sock.async_connect(ep, use_awaitable);
+
+    message<message_type> helloMsg{ message_type::CLIENT_HELLO, payload_definition<message_type::CLIENT_HELLO>::size_bytes };
+    message_payload<message_type> payload;
+    payload << "Hello";
+
+    co_await sock.async_write_some(asio::buffer(&helloMsg, sizeof(helloMsg)), use_awaitable);
+    co_await sock.async_write_some(asio::buffer(payload.data(), payload.size()), use_awaitable);
+
+    co_return;
+}
+
 int main() {
     asio::io_context ctx;
 
@@ -248,11 +268,12 @@ int main() {
 
 	asio::ip::tcp::endpoint ep{ asio::ip::make_address("127.0.0.1", ec), 60000 };
 
-	//asio::ip::tcp::socket sock{ ctx };
+	asio::ip::tcp::socket sock{ ctx };
 
-    ice::socket sock{ ctx };
+    //ice::socket sock{ ctx };
 
-    task t = client(sock, ep);
+    //task t = client(sock, ep);
+    asio::co_spawn(ctx, client2(sock, ep), asio::detached);
 
     int i;
     std::cin >> i;
