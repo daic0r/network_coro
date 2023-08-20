@@ -247,11 +247,46 @@ awaitable<void> client2(asio::ip::tcp::socket& sock, asio::ip::tcp::endpoint ep)
 
     co_await sock.async_connect(ep, use_awaitable);
 
-    message<message_type> helloMsg{ message_type::CLIENT_HELLO, payload_definition<message_type::CLIENT_HELLO>::size_bytes };
+    message_header<message_type> helloMsg{ message_type::CLIENT_HELLO, payload_definition<message_type, message_type::CLIENT_HELLO>::size_bytes };
     message_payload<message_type> payload;
     payload << "Hello";
 
-    co_await sock.async_write_some(asio::buffer(&helloMsg, sizeof(helloMsg)), use_awaitable);
+    co_await sock.async_write_some(asio::buffer(&helloMsg.messageID, sizeof(helloMsg.messageID)), use_awaitable);
+    co_await sock.async_write_some(asio::buffer(&helloMsg.nSize, sizeof(helloMsg.nSize)), use_awaitable);
+    co_await sock.async_write_some(asio::buffer(payload.data(), payload.size()), use_awaitable);
+
+    asio::error_code ec{};
+
+    message_header<message_type> handshakeMsg; 
+    co_await sock.async_read_some(asio::buffer(&handshakeMsg.messageID, sizeof(handshakeMsg.messageID)), asio::redirect_error(asio::use_awaitable, ec));
+    co_await sock.async_read_some(asio::buffer(&handshakeMsg.nSize, sizeof(handshakeMsg.nSize)), asio::redirect_error(asio::use_awaitable, ec));
+
+    assert((handshakeMsg.messageID == message_type::SERVER_HANDSHAKE));
+    std::cout << "[CLIENT] Received server handshake. Server sent payload of " << handshakeMsg.nSize << " bytes.\n";
+    
+    payload.vBytes.clear();
+    payload.vBytes.resize(handshakeMsg.nSize);
+
+    auto nBytes = co_await sock.async_read_some(asio::buffer(payload.data(), payload.size()), asio::redirect_error(asio::use_awaitable, ec));
+    payload.nPos = payload.size();
+
+    std::vector<char> vHandshake;
+    payload >> vHandshake;
+
+    std::string_view strHandshake(vHandshake.data(), vHandshake.size());
+   
+    std::cout << "[CLIENT] Payload is '" << strHandshake << "'\n";
+
+
+    handshakeMsg.messageID = message_type::CLIENT_HANDSHAKE;
+    handshakeMsg.nSize = payload_definition<message_type, message_type::CLIENT_HANDSHAKE>::size_bytes;
+    payload.clear();
+    payload << std::hash<std::string_view>{}(strHandshake);
+
+    std::cout << "[CLIENT] Hash I calculated is " << std::hash<std::string_view>{}(strHandshake) << "\n";
+
+    co_await sock.async_write_some(asio::buffer(&handshakeMsg.messageID, sizeof(handshakeMsg.messageID)), use_awaitable);
+    co_await sock.async_write_some(asio::buffer(&handshakeMsg.nSize, sizeof(handshakeMsg.nSize)), use_awaitable);
     co_await sock.async_write_some(asio::buffer(payload.data(), payload.size()), use_awaitable);
 
     co_return;

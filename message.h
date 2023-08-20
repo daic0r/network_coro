@@ -7,6 +7,7 @@
 #include <concepts>
 #include <vector>
 #include <tuple>
+#include <random>
 
 namespace ice {
     template<typename T>
@@ -41,6 +42,16 @@ namespace ice {
             using data = std::tuple<char[6]>;
             static constexpr auto size_bytes = detail::sizeof_tuple_v<data>;
         };
+        template<>
+        struct payload_definition<message_type, message_type::SERVER_HANDSHAKE> {
+            using data = std::tuple<std::vector<char>>;
+            static constexpr auto size_bytes = 0z;
+        };
+        template<>
+        struct payload_definition<message_type, message_type::CLIENT_HANDSHAKE> {
+            using data = std::tuple<std::size_t>;
+            static constexpr auto size_bytes = detail::sizeof_tuple_v<data>;
+        };
 
         template<Enumeration Enum>
         struct message_payload {
@@ -53,6 +64,7 @@ namespace ice {
 
             constexpr auto size() const noexcept { return vBytes.size(); }
             constexpr auto data() noexcept { return vBytes.data(); }
+            constexpr void clear() noexcept { vBytes.clear(); }
 
             template<Trivial T>
             friend constexpr message_payload& operator<<(message_payload& mp, T const& data) {
@@ -63,10 +75,32 @@ namespace ice {
                 return mp;
             }
 
+            template<typename T>
+            friend constexpr message_payload& operator<<(message_payload& mp, std::vector<T> const& vec) {
+                const auto nVecBytes = sizeof(T)*vec.size();
+                const auto nOldSize = mp.vBytes.size();
+                mp.vBytes.resize(nOldSize + nVecBytes);
+                std::memcpy(std::next(mp.vBytes.data(), nOldSize), vec.data(), nVecBytes);
+                mp.nPos += nVecBytes;
+                mp << nVecBytes;
+                return mp;
+            }
+
             template<Trivial T>
             friend constexpr message_payload& operator>>(message_payload& mp, T& data) {
                 mp.nPos -= sizeof(T);
                 std::memcpy(&data, std::next(mp.vBytes.data(), mp.nPos), sizeof(T));
+                return mp;
+            }
+
+            template<typename T>
+            friend constexpr message_payload& operator>>(message_payload& mp, std::vector<T>& data) {
+                std::size_t nSize{};
+                mp >> nSize;
+                data.clear();
+                data.resize(nSize);
+                mp.nPos -= nSize;
+                std::memcpy(data.data(), std::next(mp.vBytes.data(), mp.nPos), nSize);
                 return mp;
             }
 
@@ -84,7 +118,7 @@ namespace ice {
         };
 
         template<Enumeration T>
-        struct message {
+        struct message_header {
             T messageID{};
             std::uint32_t nSize{};
         };
