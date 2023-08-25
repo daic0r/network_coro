@@ -11,6 +11,7 @@
 #include <optional>
 #include <future>
 #include "message.h"
+#include "connection.h"
 
 using asio::awaitable;
 using asio::use_awaitable;
@@ -48,6 +49,7 @@ awaitable<int> calculate_it(std::thread& t, int& result) {
 */
 
 namespace ice {
+  /*
     class socket {
         asio::io_context& m_context;
         asio::ip::tcp::socket m_socket;
@@ -167,8 +169,10 @@ namespace ice {
 
 
     };
+*/
 }
 
+/*
 class task {
 
 public:
@@ -216,11 +220,9 @@ public:
 
 private:
 	handle_type handle_;
-    /*
     asio::io_context m_context;
     asio::io_context::work m_idleWork;
     std::thread m_thread;
-    */
 };
 
 task client(ice::socket& sock, asio::ip::tcp::endpoint ep) {
@@ -241,53 +243,105 @@ task client(ice::socket& sock, asio::ip::tcp::endpoint ep) {
     for (auto ch: buf)
         std::cout << ch;
 }
+*/
 
-awaitable<void> client2(asio::ip::tcp::socket& sock, asio::ip::tcp::endpoint ep) {
+namespace ice {
+  namespace net {
+    template<typename T>
+      class client {
+        asio::ip::tcp::endpoint m_ep; 
+        connection<T> m_conn;
+
+        public:
+        client(asio::io_context& ctx, asio::ip::tcp::endpoint ep) : m_ep{ ep }, m_conn{ ctx } {}
+               
+        asio::awaitable<bool> connect() {
+          if (not co_await m_conn.connect(m_ep))
+            co_return false;
+
+          std::cout << "[CLIENT] Connected. Sending hello\n";
+
+          message<system_message> helloMsg{ system_message::CLIENT_HELLO, payload_definition<system_message, system_message::CLIENT_HELLO>::size_bytes };
+          helloMsg.payload << "Hello";
+
+          /*
+          co_await sock.async_write_some(asio::buffer(&helloMsg.messageID, sizeof(helloMsg.messageID)), use_awaitable);
+          co_await sock.async_write_some(asio::buffer(&helloMsg.nSize, sizeof(helloMsg.nSize)), use_awaitable);
+          co_await sock.async_write_some(asio::buffer(payload.data(), payload.size()), use_awaitable);
+          */
+          co_await m_conn.send(helloMsg);
+
+          asio::error_code ec{};
+
+          /*
+          message_header<system_message> handshakeMsg; 
+          co_await sock.async_read_some(asio::buffer(&handshakeMsg.messageID, sizeof(handshakeMsg.messageID)), asio::redirect_error(asio::use_awaitable, ec));
+          co_await sock.async_read_some(asio::buffer(&handshakeMsg.nSize, sizeof(handshakeMsg.nSize)), asio::redirect_error(asio::use_awaitable, ec));
+
+          assert((handshakeMsg.messageID == system_message::SERVER_HANDSHAKE));
+          std::cout << "[CLIENT] Received server handshake. Server sent payload of " << handshakeMsg.nSize << " bytes.\n";
+
+          payload.vBytes.clear();
+          payload.vBytes.resize(handshakeMsg.nSize);
+
+          auto nBytes = co_await sock.async_read_some(asio::buffer(payload.data(), payload.size()), asio::redirect_error(asio::use_awaitable, ec));
+          payload.nPos = payload.size();
+
+          std::vector<char> vHandshake;
+          payload >> vHandshake;
+          */
+
+          auto msgCoro = m_conn.message(co_await asio::this_coro::executor);
+          auto handshakeMsg = *co_await msgCoro.async_resume(asio::use_awaitable);
+
+          std::vector<char> vHandshake;
+          handshakeMsg.payload >> vHandshake;
+          std::string_view strHandshake(vHandshake.data(), vHandshake.size());
+
+          std::cout << "[CLIENT] Payload is '" << strHandshake << "'\n";
+
+
+          handshakeMsg.header.messageID = (T)(int)(system_message::CLIENT_HANDSHAKE);
+          handshakeMsg.header.nSize = payload_definition<system_message, system_message::CLIENT_HANDSHAKE>::size_bytes;
+          handshakeMsg.payload.clear();
+          handshakeMsg.payload << std::hash<std::string_view>{}(strHandshake);
+
+          std::cout << "[CLIENT] Hash I calculated is " << std::hash<std::string_view>{}(strHandshake) << "\n";
+
+          co_await m_conn.send(handshakeMsg);
+
+          /*
+          co_await sock.async_write_some(asio::buffer(&handshakeMsg.messageID, sizeof(handshakeMsg.messageID)), use_awaitable);
+          co_await sock.async_write_some(asio::buffer(&handshakeMsg.nSize, sizeof(handshakeMsg.nSize)), use_awaitable);
+          co_await sock.async_write_some(asio::buffer(payload.data(), payload.size()), use_awaitable);
+          */
+          co_return true;
+
+        }
+
+        auto& connection() noexcept { return m_conn; }
+      };
+  }
+}
+
+enum class my_message {
+  ROLL_DICE
+};
+
+awaitable<void> client2(asio::io_context& ctx, asio::ip::tcp::endpoint ep) {
     using namespace ice::net;
 
-    co_await sock.async_connect(ep, use_awaitable);
+    ice::net::client<my_message> client{ ctx, ep };
+    const auto bConn = co_await client.connect();
+    if (bConn) {
+      std::cout << "[CLIENT] Connected to server\n";
+    }
 
-    message_header<message_type> helloMsg{ message_type::CLIENT_HELLO, payload_definition<message_type, message_type::CLIENT_HELLO>::size_bytes };
-    message_payload<message_type> payload;
-    payload << "Hello";
-
-    co_await sock.async_write_some(asio::buffer(&helloMsg.messageID, sizeof(helloMsg.messageID)), use_awaitable);
-    co_await sock.async_write_some(asio::buffer(&helloMsg.nSize, sizeof(helloMsg.nSize)), use_awaitable);
-    co_await sock.async_write_some(asio::buffer(payload.data(), payload.size()), use_awaitable);
-
-    asio::error_code ec{};
-
-    message_header<message_type> handshakeMsg; 
-    co_await sock.async_read_some(asio::buffer(&handshakeMsg.messageID, sizeof(handshakeMsg.messageID)), asio::redirect_error(asio::use_awaitable, ec));
-    co_await sock.async_read_some(asio::buffer(&handshakeMsg.nSize, sizeof(handshakeMsg.nSize)), asio::redirect_error(asio::use_awaitable, ec));
-
-    assert((handshakeMsg.messageID == message_type::SERVER_HANDSHAKE));
-    std::cout << "[CLIENT] Received server handshake. Server sent payload of " << handshakeMsg.nSize << " bytes.\n";
-    
-    payload.vBytes.clear();
-    payload.vBytes.resize(handshakeMsg.nSize);
-
-    auto nBytes = co_await sock.async_read_some(asio::buffer(payload.data(), payload.size()), asio::redirect_error(asio::use_awaitable, ec));
-    payload.nPos = payload.size();
-
-    std::vector<char> vHandshake;
-    payload >> vHandshake;
-
-    std::string_view strHandshake(vHandshake.data(), vHandshake.size());
-   
-    std::cout << "[CLIENT] Payload is '" << strHandshake << "'\n";
-
-
-    handshakeMsg.messageID = message_type::CLIENT_HANDSHAKE;
-    handshakeMsg.nSize = payload_definition<message_type, message_type::CLIENT_HANDSHAKE>::size_bytes;
-    payload.clear();
-    payload << std::hash<std::string_view>{}(strHandshake);
-
-    std::cout << "[CLIENT] Hash I calculated is " << std::hash<std::string_view>{}(strHandshake) << "\n";
-
-    co_await sock.async_write_some(asio::buffer(&handshakeMsg.messageID, sizeof(handshakeMsg.messageID)), use_awaitable);
-    co_await sock.async_write_some(asio::buffer(&handshakeMsg.nSize, sizeof(handshakeMsg.nSize)), use_awaitable);
-    co_await sock.async_write_some(asio::buffer(payload.data(), payload.size()), use_awaitable);
+    auto msgCoro = client.connection().message(co_await asio::this_coro::executor);
+    for (;;) {
+      auto msg = *co_await msgCoro.async_resume(asio::use_awaitable);
+      std::cout << "[CLIENT] Received message " << (int)msg.header.messageID << " of size " << msg.header.nSize << "\n";
+    }
 
     co_return;
 }
@@ -295,9 +349,7 @@ awaitable<void> client2(asio::ip::tcp::socket& sock, asio::ip::tcp::endpoint ep)
 int main() {
     asio::io_context ctx;
 
-    asio::io_context::work idleWork{ ctx };
-
-    std::thread thr{ [&ctx]() { ctx.run(); } };
+//    asio::io_context::work idleWork{ ctx };
 
 	asio::error_code ec{};
 
@@ -308,15 +360,17 @@ int main() {
     //ice::socket sock{ ctx };
 
     //task t = client(sock, ep);
-    asio::co_spawn(ctx, client2(sock, ep), asio::detached);
+    asio::co_spawn(ctx, client2(ctx, ep), asio::detached);
+
+    std::vector<std::thread> vThreads;
+    for (int i = 0; i < 2; ++i) {
+      vThreads.emplace_back([&ctx]() { ctx.run(); }); 
+    }
 
     int i;
     std::cin >> i;
 
     ctx.stop();
-    if (thr.joinable())
-        thr.join();
-
-
-
+    for (auto& t: vThreads)
+      t.join();
 }

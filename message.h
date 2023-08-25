@@ -12,7 +12,7 @@
 
 namespace ice {
   template<typename T>
-    concept Enumeration = std::is_enum_v<T>;
+    concept Enumeration = std::is_enum_v<T> and std::is_same_v<std::underlying_type_t<T>, int>;
 
   template<typename T>
     concept Trivial = std::is_trivial_v<T>;
@@ -29,33 +29,32 @@ namespace ice {
       template<typename T>
         static constexpr auto sizeof_tuple_v = sizeof_tuple<T>::value;
     }
-    enum class message_type {
+    enum system_message {
       NONE,
-      CLIENT_HELLO,
-      SERVER_HANDSHAKE,
-      CLIENT_HANDSHAKE,
-      CLIENT_HEARTBEAT
+      CLIENT_HELLO = -1,
+      SERVER_HANDSHAKE = -2,
+      CLIENT_HANDSHAKE = -3,
+      HEARTBEAT = -4
     };
 
     template<Enumeration Enum, Enum T>
       struct payload_definition;
     template<>
-      struct payload_definition<message_type, message_type::CLIENT_HELLO> {
+      struct payload_definition<system_message, system_message::CLIENT_HELLO> {
         using data = std::tuple<char[6]>;
         static constexpr auto size_bytes = detail::sizeof_tuple_v<data>;
       };
     template<>
-      struct payload_definition<message_type, message_type::SERVER_HANDSHAKE> {
+      struct payload_definition<system_message, system_message::SERVER_HANDSHAKE> {
         using data = std::tuple<std::vector<char>>;
         static constexpr auto size_bytes = std::numeric_limits<std::size_t>::max();
       };
     template<>
-      struct payload_definition<message_type, message_type::CLIENT_HANDSHAKE> {
+      struct payload_definition<system_message, system_message::CLIENT_HANDSHAKE> {
         using data = std::tuple<std::size_t>;
         static constexpr auto size_bytes = detail::sizeof_tuple_v<data>;
       };
 
-    template<Enumeration Enum>
       struct message_payload {
         std::vector<char> vBytes{};
         std::size_t nPos{};
@@ -66,7 +65,9 @@ namespace ice {
 
         constexpr auto size() const noexcept { return vBytes.size(); }
         constexpr auto data() noexcept { return vBytes.data(); }
-        constexpr void clear() noexcept { vBytes.clear(); }
+        constexpr auto data() const noexcept { return vBytes.data(); }
+        constexpr void clear() noexcept { vBytes.clear(); nPos = 0;}
+        constexpr void resize(std::size_t nSize) { vBytes.resize(nSize); }
 
         template<Trivial T>
           friend constexpr message_payload& operator<<(message_payload& mp, T const& data) {
@@ -106,7 +107,7 @@ namespace ice {
             return mp;
           }
 
-        template<Enum E>
+        template<Enumeration Enum, Enum E>
           constexpr typename payload_definition<Enum, E>::data read() noexcept {
             typename payload_definition<Enum, E>::data ret{};
             _read(ret, std::make_index_sequence<std::tuple_size_v<typename payload_definition<Enum, E>::data>>());
@@ -123,12 +124,17 @@ namespace ice {
       struct message_header {
         T messageID{};
         std::uint32_t nSize{};
+
+        constexpr auto rawID() noexcept { return static_cast<std::underlying_type_t<T>>(messageID); }
       };
 
     template<typename T>
       struct message {
-        message_header<message_header<T>> header{};
-        message_payload<T> payload{};
+        constexpr message() noexcept = default;
+        constexpr message(T id, std::uint32_t nSize = 0) noexcept : header{ id, nSize } {}
+
+        message_header<T> header{};
+        message_payload payload{};
       };
 
   }
