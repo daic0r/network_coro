@@ -250,14 +250,19 @@ namespace ice {
     template<typename T>
       class client {
         asio::ip::tcp::endpoint m_ep; 
-        connection<T> m_conn;
+        std::shared_ptr<connection<T>> m_conn;
 
         public:
-        client(asio::io_context& ctx, asio::ip::tcp::endpoint ep) : m_ep{ ep }, m_conn{ ctx } {}
+        client(asio::io_context& ctx, asio::ip::tcp::endpoint ep) : m_ep{ ep }, m_conn{ std::make_shared<connection<T>>(ctx) } {}
                
         asio::awaitable<bool> connect() {
-          if (not co_await m_conn.connect(m_ep))
+          try {
+            co_await m_conn->connect(m_ep);
+          }
+          catch (...) {
+            std::clog << "[CLIENT] Connection failed.\n";
             co_return false;
+          }
 
           std::cout << "[CLIENT] Connected. Sending hello\n";
 
@@ -269,7 +274,7 @@ namespace ice {
           co_await sock.async_write_some(asio::buffer(&helloMsg.nSize, sizeof(helloMsg.nSize)), use_awaitable);
           co_await sock.async_write_some(asio::buffer(payload.data(), payload.size()), use_awaitable);
           */
-          co_await m_conn.send(helloMsg);
+          co_await m_conn->send(helloMsg);
 
           asio::error_code ec{};
 
@@ -291,8 +296,11 @@ namespace ice {
           payload >> vHandshake;
           */
 
-          auto msgCoro = m_conn.message(co_await asio::this_coro::executor);
-          auto handshakeMsg = *co_await msgCoro.async_resume(asio::use_awaitable);
+          auto msgCoro = m_conn->message(co_await asio::this_coro::executor);
+          auto handshakeMsgOpt = co_await msgCoro.async_resume(asio::use_awaitable);
+          if (not handshakeMsgOpt.has_value())
+            co_return false;
+          auto handshakeMsg = handshakeMsgOpt.value();
 
           std::vector<char> vHandshake;
           handshakeMsg.payload >> vHandshake;
@@ -308,7 +316,7 @@ namespace ice {
 
           std::cout << "[CLIENT] Hash I calculated is " << std::hash<std::string_view>{}(strHandshake) << "\n";
 
-          co_await m_conn.send(handshakeMsg);
+          co_await m_conn->send(handshakeMsg);
 
           /*
           co_await sock.async_write_some(asio::buffer(&handshakeMsg.messageID, sizeof(handshakeMsg.messageID)), use_awaitable);
@@ -319,7 +327,7 @@ namespace ice {
 
         }
 
-        auto& connection() noexcept { return m_conn; }
+        auto& conn() noexcept { return m_conn; }
       };
   }
 }
@@ -328,18 +336,36 @@ enum class my_message {
   ROLL_DICE
 };
 
-awaitable<void> client2(asio::io_context& ctx, asio::ip::tcp::endpoint ep) {
+awaitable<void> client2(ice::net::client<my_message>& client, asio::ip::tcp::endpoint ep) {
+
     using namespace ice::net;
 
-    ice::net::client<my_message> client{ ctx, ep };
     const auto bConn = co_await client.connect();
     if (bConn) {
       std::cout << "[CLIENT] Connected to server\n";
+    } else {
+      std::cout << "[CLIENT] Connection failed\n";
+      co_return;
     }
 
-    auto msgCoro = client.connection().message(co_await asio::this_coro::executor);
+    auto msgCoro = client.conn()->message(co_await asio::this_coro::executor);
     for (;;) {
-      auto msg = *co_await msgCoro.async_resume(asio::use_awaitable);
+      std::optional<ice::net::message<my_message>> msgOpt;
+      try {
+        msgOpt = co_await msgCoro.async_resume(asio::use_awaitable);
+        if (not msgOpt) {
+          std::cout << "[CLIENT] Empty optional received. Breaking from loop.\n";
+          co_return;
+        }
+      }
+      catch (...) {
+        std::clog << "[CLIENT] Exception thrown from async_resume.\n";
+      }
+      auto& msg = msgOpt.value();
+      if (not client.conn()->connected()) {
+        std::cout << "[CLIENT] Disconnected, breaking from loop.\n";
+        break;
+      }
       std::cout << "[CLIENT] Received message " << (int)msg.header.messageID << " of size " << msg.header.nSize << "\n";
     }
 
@@ -355,20 +381,25 @@ int main() {
 
 	asio::ip::tcp::endpoint ep{ asio::ip::make_address("127.0.0.1", ec), 60000 };
 
-	asio::ip::tcp::socket sock{ ctx };
-
+    ice::net::client<my_message> client{ ctx, ep };
     //ice::socket sock{ ctx };
 
     //task t = client(sock, ep);
-    asio::co_spawn(ctx, client2(ctx, ep), asio::detached);
+    asio::co_spawn(ctx, client2(client, ep), [](std::exception_ptr ptr) {
+      std::clog << "[CLIENT] Exception caught in top-level coroutine.\n";
+    });
 
     std::vector<std::thread> vThreads;
     for (int i = 0; i < 2; ++i) {
       vThreads.emplace_back([&ctx]() { ctx.run(); }); 
     }
 
-    int i;
+    int i{};
     std::cin >> i;
+
+    client.conn()->disconnect();
+
+    std::cout << "[CLIENT] Stopping context and joining threads.\n";
 
     ctx.stop();
     for (auto& t: vThreads)

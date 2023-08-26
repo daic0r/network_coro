@@ -10,7 +10,7 @@ namespace ice {
     template<typename T>
       class ts_queue {
         std::deque<T> m_qQueue{};
-        std::mutex m_mutex{};
+        mutable std::mutex m_mutex{};
 
       public:
         ts_queue() = default;

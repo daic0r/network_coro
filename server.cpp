@@ -30,21 +30,32 @@ namespace ice {
 
     template<Enumeration T>
     class server {
-      std::list<connection<T>> m_lConnections{};
+      std::list<std::shared_ptr<connection<T>>> m_lConnections{};
       asio::io_context& m_ctx;
+      asio::ip::tcp::endpoint m_endpoint;
+      asio::ip::tcp::acceptor m_acceptor;
 
       public:
-        server(asio::io_context& ctx) : m_ctx{ ctx } {}
-        awaitable<void> handleConnectionMessages(connection<T>& conn) { //asio::ip::tcp::socket sock, asio::ip::tcp::endpoint remoteEp) {
+        server(asio::io_context& ctx, asio::ip::tcp::endpoint ep) : m_ctx{ ctx }, m_endpoint{ ep }, m_acceptor{ ctx, ep.protocol() }
+        {
+          m_acceptor.bind(ep);
+          m_acceptor.listen(128);
+        }
+        awaitable<void> handleConnectionMessages(std::shared_ptr<connection<T>> conn) { //asio::ip::tcp::socket sock, asio::ip::tcp::endpoint remoteEp) {
           using namespace ice::net;
 
           std::size_t nHash{};
 
-          auto msgCoro = conn.message(m_ctx.get_executor());
+          auto msgCoro = conn->message(m_ctx.get_executor());
 
           while (true) {
             std::cout << "[SERVER] Waiting for message...\n";
-            auto msg = *co_await msgCoro.async_resume(asio::use_awaitable);
+            auto msgOpt = co_await msgCoro.async_resume(asio::use_awaitable);
+            if (not msgOpt) {
+              std::clog << "[SERVER] Detected disconnect. Exiting message handling loop.\n";
+              break;
+            }
+            auto msg = msgOpt.value();
 
             /*
             asio::error_code ec{};
@@ -90,7 +101,7 @@ namespace ice {
                   msg.payload.clear();
                   msg.payload << vHandshake;
 
-                  co_await conn.send(msg);
+                  co_await conn->send(msg);
 
                   //co_await sock.async_write_some(asio::buffer(payload.data(), payload.size()), asio::use_awaitable);
                 }
@@ -140,27 +151,39 @@ namespace ice {
           co_return;
         }
 
-        awaitable<void> run(asio::io_context& ctx, asio::ip::tcp::endpoint ep) {
+        awaitable<void> run() {
           std::vector<ice::net::connection<ice::net::system_message>> vConns;
 
-          asio::ip::tcp::acceptor acc{ ctx, ep.protocol() };
-          acc.bind(ep);
-          acc.listen(128);
-          std::cout << "[SERVER] Listening on " << acc.local_endpoint() << "\n";
+          //m_acceptor.bind(ep);
+          //m_acceptor.listen(128);
+          std::cout << "[SERVER] Listening on " << m_acceptor.local_endpoint() << "\n";
           while(true) {
-            auto sock = co_await acc.async_accept(asio::use_awaitable);
+            asio::ip::tcp::socket sock{ m_ctx };
+            try {
+              sock = co_await m_acceptor.async_accept(asio::use_awaitable);
+            }
+            catch (...) {
+              std::clog << "[SERVER] Acceptor closed.\n";
+              break;
+            }
             auto remoteEp = sock.remote_endpoint();
             std::cout << "[SERVER] Connection from " << remoteEp << ".\n";
             auto ex = sock.get_executor();
             
-            auto& conn = m_lConnections.emplace_back(ctx, std::move(sock), [this](connection<T>& conn) mutable {
+            auto& connPtr = m_lConnections.emplace_back(std::make_shared<connection<T>>(m_ctx, std::move(sock), [this](std::shared_ptr<connection<T>> connPtr) mutable {
               std::cout << "[SERVER] Connection closed.\n";
-              m_lConnections.remove(conn);
-            });
+              m_lConnections.remove(connPtr);
+            }));
+            connPtr->start();
             //asio::co_spawn(ctx, conn.listen(), asio::detached);
-            asio::co_spawn(ex, handleConnectionMessages(conn), asio::detached);
+            asio::co_spawn(ex, handleConnectionMessages(connPtr), asio::detached);
           }
           co_return;
+        }
+
+        void shutDown() {
+          m_acceptor.cancel();
+          m_acceptor.close();
         }
 
       private:
@@ -201,16 +224,20 @@ int main() {
 
 	asio::ip::tcp::endpoint ep{ asio::ip::address_v4::any(), 60000 };
 
-  ice::net::server<my_message> serv{ctx};
+  ice::net::server<my_message> serv{ctx, ep};
     
-    asio::co_spawn(ctx, serv.run(ctx, ep), asio::detached);
+    asio::co_spawn(ctx, serv.run(), asio::detached);
 
     std::vector<std::thread> vThreads;
-    for (int i = 0; i < 2; ++i)
+    for (int i = 0; i < 3; ++i)
       vThreads.emplace_back([&ctx] { ctx.run(); });
 
     int i;
     std::cin >> i;
+
+    std::clog << "[SERVER] Stopping context.\n";
+
+    serv.shutDown();
 
     ctx.stop();
     for (auto& thread : vThreads)
