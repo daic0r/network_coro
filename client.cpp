@@ -256,13 +256,9 @@ namespace ice {
         client(asio::io_context& ctx, asio::ip::tcp::endpoint ep) : m_ep{ ep }, m_conn{ std::make_shared<connection<T>>(ctx) } {}
                
         asio::awaitable<bool> connect() {
-          try {
-            co_await m_conn->connect(m_ep);
-          }
-          catch (...) {
-            std::clog << "[CLIENT] Connection failed.\n";
+          const auto bConnected = co_await m_conn->connect(m_ep);
+          if (not bConnected)
             co_return false;
-          }
 
           std::cout << "[CLIENT] Connected. Sending hello\n";
 

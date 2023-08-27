@@ -50,9 +50,16 @@ namespace ice {
 
           while (true) {
             std::cout << "[SERVER] Waiting for message...\n";
-            auto msgOpt = co_await msgCoro.async_resume(asio::use_awaitable);
-            if (not msgOpt) {
-              std::clog << "[SERVER] Detected disconnect. Exiting message handling loop.\n";
+            std::optional<ice::net::message<T>> msgOpt;
+            try {
+              msgOpt = co_await msgCoro.async_resume(asio::use_awaitable);
+              if (not msgOpt) {
+                std::clog << "[SERVER] Detected disconnect. Exiting message handling loop.\n";
+                break;
+              }
+            }
+            catch (const std::exception& ex) {
+              std::clog << "Exception during async_resume(): " << ex.what() << "\n";
               break;
             }
             auto msg = msgOpt.value();
@@ -170,9 +177,10 @@ namespace ice {
             std::cout << "[SERVER] Connection from " << remoteEp << ".\n";
             auto ex = sock.get_executor();
             
-            auto& connPtr = m_lConnections.emplace_back(std::make_shared<connection<T>>(m_ctx, std::move(sock), [this](std::shared_ptr<connection<T>> connPtr) mutable {
+            auto& connPtr = m_lConnections.emplace_back(std::make_shared<connection<T>>(m_ctx, std::move(sock), [this](std::shared_ptr<connection<T>>& connPtr) mutable {
               std::cout << "[SERVER] Connection closed.\n";
               m_lConnections.remove(connPtr);
+              std::clog << "[SERVER] I still have " << m_lConnections.size() << " active connections\n";
             }));
             connPtr->start();
             //asio::co_spawn(ctx, conn.listen(), asio::detached);

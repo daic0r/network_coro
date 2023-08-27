@@ -6,6 +6,7 @@
 #include <asio/awaitable.hpp>
 #include <asio/io_context.hpp>
 #include <asio/steady_timer.hpp>
+#include <asio/system_error.hpp>
 #include <asio/use_awaitable.hpp>
 #include "message.h"
 #include "ts_queue.h"
@@ -18,6 +19,7 @@
 #include <asio/experimental/coro.hpp>
 #include <semaphore>
 #include <asio/experimental/awaitable_operators.hpp>
+#include <asio/experimental/as_tuple.hpp>
 #include <memory>
 
 using namespace std::chrono_literals;
@@ -26,6 +28,8 @@ using namespace asio::experimental::awaitable_operators;
 
 namespace ice {
   namespace net {
+
+    constexpr auto use_nothrow_awaitable = asio::experimental::as_tuple(asio::use_awaitable);
 
     template<typename T>
       class connection : public std::enable_shared_from_this<connection<T>> {
@@ -38,7 +42,7 @@ namespace ice {
         std::chrono::steady_clock::time_point m_tpDeadline{};
         bool m_bConnected{};
         std::binary_semaphore m_messageAvailableSemaphore{0};
-        std::function<void(std::shared_ptr<connection>)> m_fnOnDisconnect{};
+        std::function<void(std::shared_ptr<connection>&)> m_fnOnDisconnect{};
         std::atomic<bool> m_bDone{};
 
         public:
@@ -48,7 +52,7 @@ namespace ice {
           m_socket{ m_ioContext }
         {}
 
-        connection(asio::io_context& ioContext, asio::ip::tcp::socket sock, std::function<void(std::shared_ptr<connection>)> fn)
+        connection(asio::io_context& ioContext, asio::ip::tcp::socket sock, std::function<void(std::shared_ptr<connection>&)> fn)
           : m_nID{ s_nIDCounter++ },
           m_ioContext{ ioContext },
           m_socket{ std::move(sock) },
@@ -58,21 +62,21 @@ namespace ice {
         {
         }
 
-        void setOnDisconnect(std::function<void(connection&)> fn) { m_fnOnDisconnect = std::move(fn); }
+        void setOnDisconnect(std::function<void(std::shared_ptr<connection>&)> fn) { m_fnOnDisconnect = std::move(fn); }
 
         void start() {
           if (m_bConnected) {
-            asio::co_spawn(m_ioContext, heartbeat(), [self=this->shared_from_this()](std::exception_ptr) {
+            asio::co_spawn(m_ioContext, heartbeat(), [self= this->shared_from_this()](std::exception_ptr) {
                 std::clog << "CONNECTION: Exception thrown from heartbeat()\n";
                 if (self->connected())
                   self->disconnect();
               });
-            asio::co_spawn(m_ioContext, listen(), [self=this->shared_from_this()](std::exception_ptr ptr) {
+            asio::co_spawn(m_ioContext, listen(), [self= this->shared_from_this()](std::exception_ptr ptr) {
                 std::clog << "CONNECTION: Exception thrown from listen()\n";
                 if (self->connected())
                   self->disconnect();
               });
-            std::cout << "Spawning listener\n";
+            std::clog << "Spawning listener\n";
           }
         }
 
@@ -91,20 +95,22 @@ namespace ice {
         }
 
         void disconnect() {
-          auto copy = this->shared_from_this();
-          m_socket.cancel();
-          m_socket.close();
+          auto self = this->shared_from_this();
+          try {
+            m_socket.cancel();
+            m_socket.close();
+          }
+          catch (const asio::system_error&) {}
           m_bDone.store(true, std::memory_order_release);
           m_messageAvailableSemaphore.release();
           m_bConnected = false;
           if (m_fnOnDisconnect) {
-            std::cout << "Running disconnect handler\n";
-            m_fnOnDisconnect(copy);
+            m_fnOnDisconnect(self);
           }
         }
         
         asio::awaitable<void> listen() {
-          auto copy = this->shared_from_this();
+          auto self = this->shared_from_this();
           for (;;) {
             std::variant<std::optional<ice::net::message<T>>, std::monostate> ret;
 
@@ -140,7 +146,9 @@ namespace ice {
                   continue;
                 }
                 m_qMessagesIn.push_back(msg);
-                m_messageAvailableSemaphore.release();
+                if (m_qMessagesIn.size() == 1)
+                  m_messageAvailableSemaphore.release();
+                std::clog << m_qMessagesIn.size() << " messages queued now.\n";
               }
               catch (...) {
                 std::clog << "I THREW ON MESSAGE RETRIEVAL\n";
@@ -151,22 +159,18 @@ namespace ice {
         }
 
         asio::experimental::coro<message<T>, void> message(asio::any_io_executor) {
-          auto copy =this->shared_from_this();
+          auto copy = this->shared_from_this();
           for (;;) {
-            try {
+            if (m_qMessagesIn.empty())
               m_messageAvailableSemaphore.acquire();
-              if (m_bDone.load(std::memory_order_acquire))
-                co_return;
 
-              auto msg = m_qMessagesIn.front();
-              m_qMessagesIn.pop_front();
-
-              co_yield std::move(msg);
-            }
-            catch (...) {
-              std::clog << "EXCEPTION IN message\n";
+            if (m_bDone.load(std::memory_order_acquire))
               co_return;
-            }
+
+            auto msg = m_qMessagesIn.front();
+            m_qMessagesIn.pop_front();
+
+            co_yield std::move(msg);
           }
           co_return;
         }
@@ -180,8 +184,8 @@ namespace ice {
               [[maybe_unused]] auto const nBytes3 = co_await m_socket.async_write_some(asio::buffer(msg.payload.data(), msg.payload.size()), asio::use_awaitable);
             }
           }
-          catch (...) {
-            std::clog << "SENDING MESSAGE FAILED.\n";
+          catch (const std::exception& ex) {
+            std::clog << "Exception during send(): " << ex.what() << "\n";
           }
           co_return;
         }
@@ -195,7 +199,7 @@ namespace ice {
 
         private:
         asio::awaitable<void> watchdog() {
-          auto copy =this->shared_from_this();
+          auto self = this->shared_from_this();
           asio::steady_timer timer{ m_ioContext };
 
           auto now = std::chrono::steady_clock::now();
@@ -208,7 +212,6 @@ namespace ice {
               co_await timer.async_wait(asio::use_awaitable);
             }
             catch (...) {
-              std::clog << "EXCEPTION: async_wait threw exception\n";
               co_return;
             }
 
@@ -219,16 +222,13 @@ namespace ice {
         }
 
         asio::awaitable<void> heartbeat() {
-          std::cout << "Sending heartbeats before shared...\n";
           try {
-            auto copy =this->shared_from_this();
+            auto self = this->shared_from_this();
           }
           catch (const std::bad_weak_ptr&) {
-            std::cout << "NO SHARED_PTR EXISTS YET\n";
+            std::clog << "NO SHARED_PTR EXISTS YET\n";
             co_return;
           }
-
-          std::cout << "Sending heartbeats after shared...\n";
 
           asio::steady_timer timer{ m_ioContext };
           timer.expires_after(8s);
@@ -237,7 +237,6 @@ namespace ice {
             co_await send(ice::net::message<system_message>{ ice::net::system_message::HEARTBEAT });
           }
           catch (...) {
-            std::clog << "EXCEPTION: async_wait or send threw exception\n";
             co_return;
           }
 
@@ -247,7 +246,6 @@ namespace ice {
               co_await send(ice::net::message<system_message>{ ice::net::system_message::HEARTBEAT });
             }
             catch (...) {
-              std::clog << "EXCEPTION: async_wait or send threw exception\n";
               co_return;
             }
 
@@ -258,6 +256,7 @@ namespace ice {
         }
 
         asio::awaitable<std::optional<ice::net::message<T>>> readMessage() {
+          auto self = this->shared_from_this();
           ice::net::message<T> msg{};
           try {
             [[maybe_unused]] auto const nBytes = co_await m_socket.async_read_some(asio::buffer(&msg.header.messageID, sizeof(msg.header.messageID)), asio::use_awaitable);
