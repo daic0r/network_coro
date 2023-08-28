@@ -41,6 +41,15 @@ namespace ice {
           m_acceptor.bind(ep);
           m_acceptor.listen(128);
         }
+
+        virtual void onMessageReceived(ice::net::connection<T>& conn, const ice::net::message<T>& msg) = 0;
+
+        // This is fire-and-forget, therefore we must copy the message so as to
+        // not get a dangling reference
+        void send(ice::net::connection<T>& conn, ice::net::message<T> msg) {
+          asio::co_spawn(m_ctx, conn.send(std::move(msg)), asio::detached);
+        }
+
         awaitable<void> handleConnectionMessages(std::shared_ptr<connection<T>> conn) { //asio::ip::tcp::socket sock, asio::ip::tcp::endpoint remoteEp) {
           using namespace ice::net;
 
@@ -64,28 +73,12 @@ namespace ice {
             }
             auto msg = msgOpt.value();
 
-            /*
-            asio::error_code ec{};
-
-            message_header<system_message> msg; 
-            co_await sock.async_read_some(asio::buffer(&msg.messageID, sizeof(msg.messageID)), asio::redirect_error(asio::use_awaitable, ec));
-            co_await sock.async_read_some(asio::buffer(&msg.nSize, sizeof(msg.nSize)), asio::redirect_error(asio::use_awaitable, ec));
-            */
-
             switch (msg.header.rawID()) {
               case system_message::CLIENT_HELLO:
                 {
                   if (not (payload_definition<system_message, system_message::CLIENT_HELLO>::size_bytes == msg.header.nSize)) {
                     std::cout << "[SERVER] CLIENT_HELLO message size is invalid. Expected " << payload_definition<system_message, system_message::CLIENT_HELLO>::size_bytes << " bytes, got " << msg.header.nSize << " bytes.\n";
                   }
-
-                  /*
-                  message_payload payload;
-                  payload.vBytes.resize(msg.nSize);
-
-                  auto nBytes = co_await sock.async_read_some(asio::buffer(payload.data(), payload.size()), asio::redirect_error(asio::use_awaitable, ec));
-                  payload.nPos = payload.size();
-                  */
 
                   auto hello = msg.payload.template read<system_message, system_message::CLIENT_HELLO>();
                   std::cout << "[SERVER] CLIENT_HELLO received. Payload is '" << std::get<0>(hello) << "'." << std::endl;
@@ -100,30 +93,15 @@ namespace ice {
                   std::cout << "[SERVER] '" << strHandshake << "'\n";
                   nHash = std::hash<std::string_view>{}(strHandshake);
 
-                  /*
-                  co_await sock.async_write_some(asio::buffer(&msg.messageID, sizeof(msg.messageID)), asio::use_awaitable);
-                  co_await sock.async_write_some(asio::buffer(&msg.nSize, sizeof(msg.nSize)), asio::use_awaitable);
-                  */
-
                   msg.payload.clear();
                   msg.payload << vHandshake;
 
                   co_await conn->send(msg);
-
-                  //co_await sock.async_write_some(asio::buffer(payload.data(), payload.size()), asio::use_awaitable);
                 }
                 break;
               case system_message::CLIENT_HANDSHAKE:
                 {
                   assert((payload_definition<system_message, system_message::CLIENT_HANDSHAKE>::size_bytes == msg.header.nSize));
-
-                  /*
-                  message_payload payload;
-                  payload.vBytes.resize(msg.nSize);
-
-                  auto nBytes = co_await sock.async_read_some(asio::buffer(payload.data(), payload.size()), asio::redirect_error(asio::use_awaitable, ec));
-                  payload.nPos = payload.size();
-                  */
 
                   auto theHashTuple = msg.payload.template read<system_message, system_message::CLIENT_HANDSHAKE>();
                   const auto theHash = std::get<0>(theHashTuple);
@@ -139,7 +117,8 @@ namespace ice {
                 }
                 break;
               default:
-                std::cout << "[SERVER] Received message type not handled yet: " << msg.header.rawID() << "\n";
+                onMessageReceived(*conn, msg);
+                break;
             }
 
             /*
@@ -183,7 +162,6 @@ namespace ice {
               std::clog << "[SERVER] I still have " << m_lConnections.size() << " active connections\n";
             }));
             connPtr->start();
-            //asio::co_spawn(ctx, conn.listen(), asio::detached);
             asio::co_spawn(ex, handleConnectionMessages(connPtr), asio::detached);
           }
           co_return;
@@ -216,11 +194,39 @@ namespace ice {
 } // namespace net
 
 } // namespace ice
-  //
-enum class my_message {
-  ROLL_DICE
-};
 
+class mensch_server : public ice::net::server<my_message> {
+
+  int roll() {
+    std::uniform_int_distribution<> dist(1,6); // Exclamation point through tilde
+    std::random_device rd;
+    std::mt19937 gen(rd());
+
+    return dist(gen);
+  }
+
+protected:
+  void onMessageReceived(ice::net::connection<my_message>& conn, const ice::net::message<my_message>& msg) override {
+    using namespace ice::net;
+    switch (msg.header.messageID) {
+      case my_message::ROLL_DICE:
+        {
+          const auto res = roll();
+          std::clog << "[SERVER] I rolled " << res << ". Sending to client.\n";
+          message<my_message> msg{ my_message::ROLL_DICE_RESULT, payload_definition<my_message, my_message::ROLL_DICE_RESULT>::size_bytes };
+          msg.payload << res;
+          send(conn, msg);
+        }
+        break;
+      default:
+        break;
+    }
+  }
+
+public:
+  using ice::net::server<my_message>::server;
+
+};
 
 int main() {
     asio::io_context ctx;
@@ -232,7 +238,7 @@ int main() {
 
 	asio::ip::tcp::endpoint ep{ asio::ip::address_v4::any(), 60000 };
 
-  ice::net::server<my_message> serv{ctx, ep};
+  mensch_server serv{ctx, ep};
     
     asio::co_spawn(ctx, serv.run(), asio::detached);
 

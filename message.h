@@ -57,7 +57,7 @@ namespace ice {
 
       struct message_payload {
         std::vector<char> vBytes{};
-        std::size_t nPos{};
+        mutable std::size_t nPos{};
 
         constexpr message_payload() {
           vBytes.resize(0);
@@ -90,14 +90,14 @@ namespace ice {
           }
 
         template<Trivial T>
-          friend constexpr message_payload& operator>>(message_payload& mp, T& data) {
+          friend constexpr message_payload const& operator>>(message_payload const& mp, T& data) {
             mp.nPos -= sizeof(T);
             std::memcpy(&data, std::next(mp.vBytes.data(), mp.nPos), sizeof(T));
             return mp;
           }
 
         template<typename T>
-          friend constexpr message_payload& operator>>(message_payload& mp, std::vector<T>& data) {
+          friend constexpr message_payload const& operator>>(message_payload const& mp, std::vector<T>& data) {
             std::size_t nSize{};
             mp >> nSize;
             data.clear();
@@ -108,14 +108,14 @@ namespace ice {
           }
 
         template<Enumeration Enum, Enum E>
-          constexpr typename payload_definition<Enum, E>::data read() noexcept {
+          constexpr typename payload_definition<Enum, E>::data read() const noexcept {
             typename payload_definition<Enum, E>::data ret{};
             _read(ret, std::make_index_sequence<std::tuple_size_v<typename payload_definition<Enum, E>::data>>());
             return ret;
           }
         private:
         template<typename... Ts, std::size_t... Is>
-          constexpr auto _read(std::tuple<Ts...>& outTup, std::index_sequence<Is...>) noexcept {
+          constexpr auto _read(std::tuple<Ts...>& outTup, std::index_sequence<Is...>) const noexcept {
             return std::make_tuple((..., (*this >> std::get<sizeof...(Is)-Is-1>(outTup))));
           }
       };
@@ -136,8 +136,18 @@ namespace ice {
         message_header<T> header{};
         message_payload payload{};
       };
-
   }
 }
+enum class my_message {
+  ROLL_DICE = 1,
+  ROLL_DICE_RESULT = 2
+};
+
+template<>
+  struct ice::net::payload_definition<my_message, my_message::ROLL_DICE_RESULT> {
+    using data = std::tuple<int>;
+    static constexpr auto size_bytes = detail::sizeof_tuple_v<data>;
+  };
+
 
 #endif

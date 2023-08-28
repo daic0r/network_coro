@@ -144,6 +144,8 @@ namespace ice {
                   std::cout << "Received heartbeat\n";
                   m_tpDeadline = std::chrono::steady_clock::now() + 10s;
                   continue;
+                } else {
+                  std::clog << "Received message with ID " << msg.header.rawID() << "\n";
                 }
                 m_qMessagesIn.push_back(msg);
                 if (m_qMessagesIn.size() == 1)
@@ -176,7 +178,7 @@ namespace ice {
         }
 
         template<typename U>
-        asio::awaitable<void> send(ice::net::message<U> const& msg) {
+        asio::awaitable<void> send(ice::net::message<U> msg) {
           try {
             [[maybe_unused]] auto const nBytes = co_await m_socket.async_write_some(asio::buffer(&msg.header.messageID, sizeof(msg.header.messageID)), asio::use_awaitable);
             [[maybe_unused]] auto const nBytes2 = co_await m_socket.async_write_some(asio::buffer(&msg.header.nSize, sizeof(msg.header.nSize)), asio::use_awaitable);
@@ -193,7 +195,10 @@ namespace ice {
         bool connected() const noexcept { return m_bConnected; }
         bool hasMessage() const noexcept { return !m_qMessagesIn.empty(); }
         std::uint32_t id() const noexcept { return m_nID; }
+        asio::ip::tcp::socket& socket() noexcept { return m_socket; }
         const asio::ip::tcp::socket& socket() const noexcept { return m_socket; }
+        asio::io_context& context() noexcept { return m_ioContext; }
+        const asio::io_context& context() const noexcept { return m_ioContext; }
 
         bool operator==(connection const& rhs) const noexcept { return m_nID == rhs.m_nID; }
 
@@ -260,7 +265,9 @@ namespace ice {
           ice::net::message<T> msg{};
           try {
             [[maybe_unused]] auto const nBytes = co_await m_socket.async_read_some(asio::buffer(&msg.header.messageID, sizeof(msg.header.messageID)), asio::use_awaitable);
+            assert(nBytes == sizeof(msg.header.messageID));
             [[maybe_unused]] auto const nBytes2 = co_await m_socket.async_read_some(asio::buffer(&msg.header.nSize, sizeof(msg.header.nSize)), asio::use_awaitable);
+            assert(nBytes2 == sizeof(msg.header.nSize));
 
             if (msg.header.nSize > 0) {
               msg.payload.resize(msg.header.nSize);
