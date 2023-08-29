@@ -52,6 +52,17 @@ namespace ice {
           m_qQueue.push_front(item);
         }
 
+        template<typename... Args>
+        void emplace_back(Args&&... args) {
+          std::scoped_lock lock{ m_mutex };
+          m_qQueue.emplace_back(std::forward<Args>(args)...);
+        }
+        template<typename... Args>
+        void emplace_front(Args&&... args) {
+          std::scoped_lock lock{ m_mutex };
+          m_qQueue.emplace_front(std::forward<Args>(args)...);
+        }
+
         void pop_front() {
           std::scoped_lock lock{ m_mutex };
           m_qQueue.pop_front();

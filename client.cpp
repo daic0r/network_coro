@@ -270,13 +270,18 @@ namespace ice {
 
           co_await m_conn->send(helloMsg);
 
+          std::clog << "[CLIENT] Back from send\n";
+
           asio::error_code ec{};
 
+          /*
           auto msgCoro = m_conn->message(co_await asio::this_coro::executor);
           auto handshakeMsgOpt = co_await msgCoro.async_resume(asio::use_awaitable);
           if (not handshakeMsgOpt.has_value())
             co_return false;
           auto handshakeMsg = handshakeMsgOpt.value();
+          */
+          auto handshakeMsg = co_await m_conn->message(asio::use_awaitable);
 
           std::vector<char> vHandshake;
           handshakeMsg.payload >> vHandshake;
@@ -304,20 +309,20 @@ namespace ice {
           asio::co_spawn(connection()->context(), run_impl(), [](std::exception_ptr ptr) {
               std::clog << "[CLIENT] Exception caught in run().\n";
               std::rethrow_exception(ptr);
-            });
+              });
         }
 
         void send(ice::net::message<T> msg) {
           asio::co_spawn(connection()->context(), connection()->send(std::move(msg)), [](std::exception_ptr ptr) {
               if (ptr) {
-                std::rethrow_exception(ptr);
+              std::rethrow_exception(ptr);
               }
               std::clog << "send co_spawn exited.\n";
-            });
+              });
         }
 
         virtual void onConnected() {}
-        virtual void onMessageReceived(const ice::net::message<T>& msg) {}
+        virtual void onMessageReceived(const ice::net::message<T>& msg) = 0;
 
         private:
         asio::awaitable<void> run_impl() {
@@ -333,8 +338,9 @@ namespace ice {
             co_return;
           }
 
-          auto msgCoro = connection()->message(connection()->socket().get_executor());
+          //auto msgCoro = connection()->message(connection()->socket().get_executor());
           for (;;) {
+            /*
             std::optional<ice::net::message<T>> msgOpt;
             try {
               msgOpt = co_await msgCoro.async_resume(asio::use_awaitable);
@@ -347,6 +353,8 @@ namespace ice {
               std::clog << "[CLIENT] Exception thrown from async_resume.\n";
             }
             auto& msg = msgOpt.value();
+            */
+            auto msg = co_await connection()->message(asio::use_awaitable);
             if (not connection()->connected()) {
               std::cout << "[CLIENT] Disconnected, breaking from loop.\n";
               break;
@@ -372,7 +380,7 @@ public:
     send(std::move(msg));
   }
 
-  void onMessageReceived(const ice::net::message<my_message>& msg) {
+  void onMessageReceived(const ice::net::message<my_message>& msg) override {
     switch (msg.header.messageID) {
       case my_message::ROLL_DICE_RESULT:
         {
@@ -402,7 +410,7 @@ int main() {
     client.run();
 
     std::vector<std::thread> vThreads;
-    for (int i = 0; i < 2; ++i) {
+    for (int i = 0; i < 1; ++i) {
       vThreads.emplace_back([&ctx]() { ctx.run(); }); 
     }
 

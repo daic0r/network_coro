@@ -21,6 +21,7 @@
 #include <asio/experimental/awaitable_operators.hpp>
 #include <asio/experimental/as_tuple.hpp>
 #include <memory>
+#include <functional>
 
 using namespace std::chrono_literals;
 using asio::experimental::coro;
@@ -41,9 +42,13 @@ namespace ice {
         ts_queue<ice::net::message<T>> m_qMessagesIn;
         std::chrono::steady_clock::time_point m_tpDeadline{};
         bool m_bConnected{};
-        std::binary_semaphore m_messageAvailableSemaphore{0};
+        //std::binary_semaphore m_messageAvailableSemaphore{0};
         std::function<void(std::shared_ptr<connection>&)> m_fnOnDisconnect{};
         std::atomic<bool> m_bDone{};
+        ts_queue<std::move_only_function<void(ice::net::message<T>)>> m_qfnMessageReturners{};
+        std::coroutine_handle<> m_resumeCoro{};
+        std::mutex m_sendMux;
+      
 
         public:
         connection(asio::io_context& ioContext)
@@ -102,7 +107,7 @@ namespace ice {
           }
           catch (const asio::system_error&) {}
           m_bDone.store(true, std::memory_order_release);
-          m_messageAvailableSemaphore.release();
+          //m_messageAvailableSemaphore.release();
           m_bConnected = false;
           if (m_fnOnDisconnect) {
             m_fnOnDisconnect(self);
@@ -137,8 +142,10 @@ namespace ice {
               //std::cout << "Received message, queue holding " << m_qMessagesIn.size() << " messages\n";
               try {
                 auto& msgOpt = std::get<std::optional<ice::net::message<T>>>(ret);
-                if (not msgOpt.has_value())
-                  co_return;
+                if (not msgOpt.has_value()) {
+                  std::clog << "FATAL: Empty message received\n";
+                  continue;
+                }
                 auto& msg = msgOpt.value();
                 if (msg.header.rawID() == ice::net::system_message::HEARTBEAT) {
                   std::cout << "Received heartbeat\n";
@@ -147,9 +154,15 @@ namespace ice {
                 } else {
                   std::clog << "Received message with ID " << msg.header.rawID() << "\n";
                 }
-                m_qMessagesIn.push_back(msg);
-                if (m_qMessagesIn.size() == 1)
-                  m_messageAvailableSemaphore.release();
+                m_qMessagesIn.push_back(std::move(msg));
+                if (not m_qfnMessageReturners.empty()) {
+                  std::clog << "Calling message handler\n";
+                  auto func = std::move(m_qfnMessageReturners.front());
+                  m_qfnMessageReturners.pop_front();
+                  auto msg = std::move(m_qMessagesIn.front());
+                  m_qMessagesIn.pop_front();
+                  std::move(func)(std::move(msg));
+                }
                 std::clog << m_qMessagesIn.size() << " messages queued now.\n";
               }
               catch (...) {
@@ -160,6 +173,28 @@ namespace ice {
           co_return;
         }
 
+        template<typename CompletionToken>
+        auto message(CompletionToken&& token) {
+          return asio::async_initiate<CompletionToken, void(ice::net::message<T>)>(
+              [self = this->shared_from_this()](auto&& handler) mutable {
+                if (self->m_bDone.load(std::memory_order_acquire)) {
+                  std::clog << "FATAL: Connection is done\n";
+                  return;
+                }
+                if (not self->m_qMessagesIn.empty()) {
+                  auto msg = std::move(self->m_qMessagesIn.front());
+                  self->m_qMessagesIn.pop_front();
+                  std::move(handler)(std::move(msg));
+                } else {
+                  std::clog << "Adding message handler\n";
+                  //self->m_fnMessageGetter = std::move(handler);
+                  self->m_qfnMessageReturners.emplace_back(std::move(handler));
+                }
+              },
+              token);
+        }
+
+        /*
         asio::experimental::coro<message<T>, void> message(asio::any_io_executor) {
           auto copy = this->shared_from_this();
           for (;;) {
@@ -176,20 +211,21 @@ namespace ice {
           }
           co_return;
         }
+        */
 
         template<typename U>
-        asio::awaitable<void> send(ice::net::message<U> msg) {
-          try {
-            [[maybe_unused]] auto const nBytes = co_await m_socket.async_write_some(asio::buffer(&msg.header.messageID, sizeof(msg.header.messageID)), asio::use_awaitable);
-            [[maybe_unused]] auto const nBytes2 = co_await m_socket.async_write_some(asio::buffer(&msg.header.nSize, sizeof(msg.header.nSize)), asio::use_awaitable);
-            if (msg.header.nSize > 0) {
-              [[maybe_unused]] auto const nBytes3 = co_await m_socket.async_write_some(asio::buffer(msg.payload.data(), msg.payload.size()), asio::use_awaitable);
-            }
-          }
-          catch (const std::exception& ex) {
-            std::clog << "Exception during send(): " << ex.what() << "\n";
-          }
-          co_return;
+        auto send(ice::net::message<U> msg) {
+          return asio::async_initiate<decltype(asio::use_awaitable), void()>(
+              [self = this->shared_from_this(), msg = std::move(msg)](auto&& handler) mutable {
+                asio::error_code ec{};
+
+                [[maybe_unused]] auto nBytes = asio::write(self->m_socket, asio::buffer(&msg.header.messageID, sizeof(msg.header.messageID)), ec);
+                nBytes = asio::write(self->m_socket, asio::buffer(&msg.header.nSize, sizeof(msg.header.nSize)));
+                if (msg.header.nSize > 0) {
+                  nBytes = asio::write(self->m_socket, asio::buffer(msg.payload.data(), msg.payload.size()));
+                }
+                std::move(handler)();
+            }, asio::use_awaitable);
         }
 
         bool connected() const noexcept { return m_bConnected; }

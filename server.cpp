@@ -55,10 +55,12 @@ namespace ice {
 
           std::size_t nHash{};
 
-          auto msgCoro = conn->message(m_ctx.get_executor());
+          //auto msgCoro = conn->message(m_ctx.get_executor());
+
 
           while (true) {
             std::cout << "[SERVER] Waiting for message...\n";
+            /*
             std::optional<ice::net::message<T>> msgOpt;
             try {
               msgOpt = co_await msgCoro.async_resume(asio::use_awaitable);
@@ -72,6 +74,10 @@ namespace ice {
               break;
             }
             auto msg = msgOpt.value();
+            */
+            auto msg = co_await conn->message(asio::use_awaitable);
+
+            std::clog << "[SERVER] Received message of type " << msg.header.rawID() << " and size " << msg.header.nSize << "\n";
 
             switch (msg.header.rawID()) {
               case system_message::CLIENT_HELLO:
@@ -243,8 +249,9 @@ int main() {
     asio::co_spawn(ctx, serv.run(), asio::detached);
 
     std::vector<std::thread> vThreads;
-    for (int i = 0; i < 3; ++i)
+    for (int i = 0; i < 1; ++i)
       vThreads.emplace_back([&ctx] { ctx.run(); });
+    //ctx.run();
 
     int i;
     std::cin >> i;
