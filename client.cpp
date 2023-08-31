@@ -268,7 +268,7 @@ namespace ice {
           message<system_message> helloMsg{ system_message::CLIENT_HELLO, payload_definition<system_message, system_message::CLIENT_HELLO>::size_bytes };
           helloMsg.payload << "Hello";
 
-          co_await m_conn->send(helloMsg);
+          m_conn->send(helloMsg);
 
           std::clog << "[CLIENT] Back from send\n";
 
@@ -297,7 +297,7 @@ namespace ice {
 
           std::cout << "[CLIENT] Hash I calculated is " << std::hash<std::string_view>{}(strHandshake) << "\n";
 
-          co_await m_conn->send(handshakeMsg);
+          m_conn->send(handshakeMsg);
 
           co_return true;
 
@@ -313,12 +313,7 @@ namespace ice {
         }
 
         void send(ice::net::message<T> msg) {
-          asio::co_spawn(connection()->context(), connection()->send(std::move(msg)), [](std::exception_ptr ptr) {
-              if (ptr) {
-              std::rethrow_exception(ptr);
-              }
-              std::clog << "send co_spawn exited.\n";
-              });
+          connection()->send(std::move(msg));
         }
 
         virtual void onConnected() {}

@@ -126,12 +126,19 @@ namespace ice {
         std::uint32_t nSize{};
 
         constexpr auto rawID() noexcept { return static_cast<std::underlying_type_t<T>>(messageID); }
+
+        constexpr message_header() noexcept = default;
+        constexpr message_header(T id, std::uint32_t nSize = 0) noexcept : messageID{ id }, nSize{ nSize } {}
+        template<typename U>
+        constexpr message_header(message_header<U> const& other) noexcept : messageID{ (T)(int)other.messageID }, nSize{ other.nSize } {}
       };
 
     template<typename T>
       struct message {
         constexpr message() noexcept = default;
         constexpr message(T id, std::uint32_t nSize = 0) noexcept : header{ id, nSize } {}
+        template<typename U>
+        constexpr message(message<U> const& other) noexcept : header{ other.header }, payload{ other.payload } {}
 
         message_header<T> header{};
         message_payload payload{};

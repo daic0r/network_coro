@@ -47,7 +47,8 @@ namespace ice {
         // This is fire-and-forget, therefore we must copy the message so as to
         // not get a dangling reference
         void send(ice::net::connection<T>& conn, ice::net::message<T> msg) {
-          asio::co_spawn(m_ctx, conn.send(std::move(msg)), asio::detached);
+          //asio::co_spawn(m_ctx, conn.send(std::move(msg)), asio::detached);
+          conn.send(std::move(msg));
         }
 
         awaitable<void> handleConnectionMessages(std::shared_ptr<connection<T>> conn) { //asio::ip::tcp::socket sock, asio::ip::tcp::endpoint remoteEp) {
@@ -102,7 +103,7 @@ namespace ice {
                   msg.payload.clear();
                   msg.payload << vHandshake;
 
-                  co_await conn->send(msg);
+                  conn->send(msg);
                 }
                 break;
               case system_message::CLIENT_HANDSHAKE:

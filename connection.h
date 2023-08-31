@@ -40,14 +40,13 @@ namespace ice {
         asio::io_context& m_ioContext;
         asio::ip::tcp::socket m_socket;
         ts_queue<ice::net::message<T>> m_qMessagesIn;
+        ts_queue<ice::net::message<T>> m_qMessagesOut;
         std::chrono::steady_clock::time_point m_tpDeadline{};
         bool m_bConnected{};
         //std::binary_semaphore m_messageAvailableSemaphore{0};
         std::function<void(std::shared_ptr<connection>&)> m_fnOnDisconnect{};
         std::atomic<bool> m_bDone{};
         ts_queue<std::move_only_function<void(ice::net::message<T>)>> m_qfnMessageReturners{};
-        std::coroutine_handle<> m_resumeCoro{};
-        std::mutex m_sendMux;
       
 
         public:
@@ -143,7 +142,7 @@ namespace ice {
               try {
                 auto& msgOpt = std::get<std::optional<ice::net::message<T>>>(ret);
                 if (not msgOpt.has_value()) {
-                  std::clog << "FATAL: Empty message received\n";
+                  //std::clog << "FATAL: Empty message received\n";
                   continue;
                 }
                 auto& msg = msgOpt.value();
@@ -184,6 +183,8 @@ namespace ice {
                 if (not self->m_qMessagesIn.empty()) {
                   auto msg = std::move(self->m_qMessagesIn.front());
                   self->m_qMessagesIn.pop_front();
+                  // Calling the handler means returning the value to the
+                  // coroutine that co_awaits message().
                   std::move(handler)(std::move(msg));
                 } else {
                   std::clog << "Adding message handler\n";
@@ -214,18 +215,11 @@ namespace ice {
         */
 
         template<typename U>
-        auto send(ice::net::message<U> msg) {
-          return asio::async_initiate<decltype(asio::use_awaitable), void()>(
-              [self = this->shared_from_this(), msg = std::move(msg)](auto&& handler) mutable {
-                asio::error_code ec{};
-
-                [[maybe_unused]] auto nBytes = asio::write(self->m_socket, asio::buffer(&msg.header.messageID, sizeof(msg.header.messageID)), ec);
-                nBytes = asio::write(self->m_socket, asio::buffer(&msg.header.nSize, sizeof(msg.header.nSize)));
-                if (msg.header.nSize > 0) {
-                  nBytes = asio::write(self->m_socket, asio::buffer(msg.payload.data(), msg.payload.size()));
-                }
-                std::move(handler)();
-            }, asio::use_awaitable);
+        void send(ice::net::message<U> msg) {
+          std::clog << "Queuing message (msg ID " << msg.header.rawID() << ")\n";
+          m_qMessagesOut.push_back(std::move(msg));
+          if (m_qMessagesOut.size() == 1)
+            asio::co_spawn(m_ioContext, sendMessages(), asio::detached);
         }
 
         bool connected() const noexcept { return m_bConnected; }
@@ -275,7 +269,7 @@ namespace ice {
           timer.expires_after(8s);
 
           try {
-            co_await send(ice::net::message<system_message>{ ice::net::system_message::HEARTBEAT });
+            send(ice::net::message<system_message>{ ice::net::system_message::HEARTBEAT });
           }
           catch (...) {
             co_return;
@@ -284,7 +278,7 @@ namespace ice {
           while (not m_bDone.load(std::memory_order_acquire)) {
             try {
               co_await timer.async_wait(asio::use_awaitable);
-              co_await send(ice::net::message<system_message>{ ice::net::system_message::HEARTBEAT });
+              send(ice::net::message<system_message>{ ice::net::system_message::HEARTBEAT });
             }
             catch (...) {
               co_return;
@@ -294,6 +288,30 @@ namespace ice {
           }
 
           co_return;
+        }
+
+        asio::awaitable<void> sendMessages() {
+          auto self = this->shared_from_this();
+          try {
+            while (not self->m_qMessagesOut.empty()) {
+              auto msg = std::move(self->m_qMessagesOut.front());
+              [[maybe_unused]] auto nBytes = co_await asio::async_write(self->m_socket, asio::buffer(&msg.header.messageID, sizeof(msg.header.messageID)), asio::use_awaitable);
+              nBytes = co_await asio::async_write(self->m_socket, asio::buffer(&msg.header.nSize, sizeof(msg.header.nSize)), asio::use_awaitable);
+              if (msg.header.nSize > 0) {
+                nBytes = co_await asio::async_write(self->m_socket, asio::buffer(msg.payload.data(), msg.payload.size()), asio::use_awaitable);
+              }
+              self->m_qMessagesOut.pop_front();
+              std::clog << self->m_qMessagesOut.size() << " messages left in queue\n";
+              if (not self->m_qMessagesOut.empty()) {
+                std::clog << "Sending next message (msg ID " << self->m_qMessagesOut.front().header.rawID() << ")\n";
+                //asio::co_spawn(self->m_ioContext, sendMessage(), asio::detached);
+              }
+            }
+          }
+          catch (...) {
+            std::clog << "sendMessage() threw exception\n";
+            co_return;
+          }
         }
 
         asio::awaitable<std::optional<ice::net::message<T>>> readMessage() {
@@ -311,7 +329,8 @@ namespace ice {
               msg.payload.nPos = msg.payload.size();
             }
           }
-          catch (...) {
+          catch (const std::exception& e) {
+            std::clog << "readMessage() threw exception: " << e.what() << "\n";
             co_return std::nullopt;
           }
 
