@@ -252,11 +252,43 @@ namespace ice {
   namespace net {
     template<typename T>
       class client {
+        asio::io_context m_ctx{};
         asio::ip::tcp::endpoint m_ep; 
         std::shared_ptr<ice::net::connection<T>> m_conn;
+        std::thread m_thread{};
 
         public:
-        client(asio::io_context& ctx, asio::ip::tcp::endpoint ep) : m_ep{ ep }, m_conn{ std::make_shared<ice::net::connection<T>>(ctx) } {}
+        client(asio::ip::tcp::endpoint ep) : m_ep{ ep }, m_conn{ std::make_shared<ice::net::connection<T>>(m_ctx) } {}
+        client(std::string_view strUrl, std::uint16_t nPort)
+          : m_ep{ std::invoke([this,&strUrl, nPort]() {
+                asio::ip::tcp::resolver resolver{ m_ctx };
+                auto results = resolver.resolve(strUrl, std::to_string(nPort));
+                return results->endpoint();
+              }) },
+          m_conn{ std::make_shared<ice::net::connection<T>>(m_ctx) }
+        {
+        }
+        client(client const&) = delete;
+        client& operator=(client const&) = delete;
+        client(client&& rhs) noexcept {
+          swap(rhs);
+        }
+        client& operator=(client&& rhs) noexcept {
+          swap(rhs);
+          return *this;
+        }
+        ~client() {
+          disconnect();
+        }
+        void swap(client& rhs) noexcept {
+          std::swap(m_ctx, rhs.m_ctx);
+          std::swap(m_ep, rhs.m_ep);
+          std::swap(m_conn, rhs.m_conn);
+          std::swap(m_thread, rhs.m_thread);
+        }
+        friend void swap(client& lhs, client& rhs) noexcept {
+          lhs.swap(rhs);
+        }
 
         asio::awaitable<bool> connect() {
           const auto bConnected = co_await m_conn->connect(m_ep);
@@ -306,14 +338,21 @@ namespace ice {
         std::shared_ptr<ice::net::connection<T>> connection() noexcept { return m_conn; }
 
         void run() {
-          asio::co_spawn(connection()->context(), run_impl(), [](std::exception_ptr ptr) {
+          asio::co_spawn(m_ctx, run_impl(), [](std::exception_ptr ptr) {
               std::clog << "[CLIENT] Exception caught in run().\n";
               std::rethrow_exception(ptr);
               });
+          m_thread = std::thread([this]() { m_ctx.run(); });
         }
 
         void send(ice::net::message<T> msg) {
           connection()->send(std::move(msg));
+        }
+
+        void disconnect() {
+          connection()->disconnect();
+          m_ctx.stop();
+          m_thread.join();
         }
 
         virtual void onConnected() {}
@@ -390,24 +429,10 @@ public:
 };
 
 int main() {
-    asio::io_context ctx;
 
-//    asio::io_context::work idleWork{ ctx };
+    mensch_client client{ "127.0.0.1", 60000 };
 
-	asio::error_code ec{};
-
-	asio::ip::tcp::endpoint ep{ asio::ip::make_address("127.0.0.1", ec), 60000 };
-
-    mensch_client client{ ctx, ep };
-    //ice::socket sock{ ctx };
-
-    //task t = client(sock, ep);
     client.run();
-
-    std::vector<std::thread> vThreads;
-    for (int i = 0; i < 1; ++i) {
-      vThreads.emplace_back([&ctx]() { ctx.run(); }); 
-    }
 
     int i{-1};
     while (i != 0) {
@@ -416,11 +441,4 @@ int main() {
         client.roll_dice();
     }
 
-    client.connection()->disconnect();
-
-    std::cout << "[CLIENT] Stopping context and joining threads.\n";
-
-    ctx.stop();
-    for (auto& t: vThreads)
-      t.join();
 }

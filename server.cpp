@@ -31,15 +31,50 @@ namespace ice {
     template<Enumeration T>
     class server {
       std::list<std::shared_ptr<connection<T>>> m_lConnections{};
-      asio::io_context& m_ctx;
+      asio::io_context m_ctx;
       asio::ip::tcp::endpoint m_endpoint;
       asio::ip::tcp::acceptor m_acceptor;
+      std::thread m_thread{};
 
       public:
-        server(asio::io_context& ctx, asio::ip::tcp::endpoint ep) : m_ctx{ ctx }, m_endpoint{ ep }, m_acceptor{ ctx, ep.protocol() }
+        server(asio::ip::tcp::endpoint ep) : m_ctx{}, m_endpoint{ ep }, m_acceptor{ m_ctx, ep }
         {
-          m_acceptor.bind(ep);
           m_acceptor.listen(128);
+        }
+        server(std::string_view strUrl, std::uint16_t nPort) 
+          : m_ctx{},
+          m_endpoint{ std::invoke([this,strUrl,nPort]() -> asio::ip::tcp::endpoint {
+            asio::ip::tcp::resolver resolver{ m_ctx };
+            auto results = resolver.resolve(strUrl, std::to_string(nPort));
+            std::clog << "[SERVER] Resolved " << strUrl << ":" << nPort << " to " << results->endpoint() << "\n";
+            return results->endpoint();
+          }) },
+          m_acceptor{ m_ctx, m_endpoint.protocol() }
+        {
+          m_acceptor.bind(m_endpoint);
+          m_acceptor.listen(128);
+        }
+        server(server const&) = delete;
+        server& operator=(server const&) = delete;
+        server(server&& rhs) noexcept {
+          swap(rhs);
+        }
+        server& operator=(server&& rhs) noexcept {
+          swap(rhs);
+          return *this;
+        }
+        ~server() {
+          shutDown();
+        }
+        void swap(server& rhs) noexcept {
+          std::swap(m_lConnections, rhs.m_lConnections);
+          std::swap(m_ctx, rhs.m_ctx);
+          std::swap(m_endpoint, rhs.m_endpoint);
+          std::swap(m_acceptor, rhs.m_acceptor);
+          std::swap(m_thread, rhs.m_thread);
+        }
+        friend void swap(server& lhs, server& rhs) noexcept {
+          lhs.swap(rhs);
         }
 
         virtual void onMessageReceived(ice::net::connection<T>& conn, const ice::net::message<T>& msg) = 0;
@@ -144,7 +179,21 @@ namespace ice {
           co_return;
         }
 
-        awaitable<void> run() {
+        void run() {
+          asio::co_spawn(m_ctx, runImpl(), asio::detached);
+          m_thread = std::thread([this] { m_ctx.run(); });
+        }
+
+
+        void shutDown() {
+          m_acceptor.cancel();
+          m_acceptor.close();
+          m_ctx.stop();
+          m_thread.join();
+        }
+
+      private:
+        awaitable<void> runImpl() {
           std::vector<ice::net::connection<ice::net::system_message>> vConns;
 
           //m_acceptor.bind(ep);
@@ -173,13 +222,6 @@ namespace ice {
           }
           co_return;
         }
-
-        void shutDown() {
-          m_acceptor.cancel();
-          m_acceptor.close();
-        }
-
-      private:
 
         static std::vector<char> generateHandshake() {
           std::uniform_int_distribution<> dist(33,126); // Exclamation point through tilde
@@ -236,33 +278,11 @@ public:
 };
 
 int main() {
-    asio::io_context ctx;
 
-//    asio::io_context::work idleWork{ ctx };
+    mensch_server serv{"127.0.0.1", 60000};
 
-
-	asio::error_code ec{};
-
-	asio::ip::tcp::endpoint ep{ asio::ip::address_v4::any(), 60000 };
-
-  mensch_server serv{ctx, ep};
-    
-    asio::co_spawn(ctx, serv.run(), asio::detached);
-
-    std::vector<std::thread> vThreads;
-    for (int i = 0; i < 1; ++i)
-      vThreads.emplace_back([&ctx] { ctx.run(); });
-    //ctx.run();
+    serv.run();
 
     int i;
     std::cin >> i;
-
-    std::clog << "[SERVER] Stopping context.\n";
-
-    serv.shutDown();
-
-    ctx.stop();
-    for (auto& thread : vThreads)
-      thread.join();
-
 }
